@@ -9,6 +9,7 @@ from copy import deepcopy
 import re
 import logging
 
+import django
 from django.conf import settings
 from django.db.backends.postgresql_psycopg2.base import (
     DatabaseFeatures as BasePGDatabaseFeatures,
@@ -16,7 +17,7 @@ from django.db.backends.postgresql_psycopg2.base import (
     DatabaseOperations as BasePGDatabaseOperations,
     DatabaseSchemaEditor as BasePGDatabaseSchemaEditor,
     DatabaseClient,
-    DatabaseCreation,
+    DatabaseCreation as BasePGDatabaseCreation,
     DatabaseIntrospection,
     BaseDatabaseValidation,
 )
@@ -32,11 +33,13 @@ class DatabaseFeatures(BasePGDatabaseFeatures):
 class DatabaseOperations(BasePGDatabaseOperations):
 
     def last_insert_id(self, cursor, table_name, pk_name):
-        cursor.execute('SELECT MAX({pk}) from {table}'.format(pk=pk_name, table=self.quote_name(table_name)))
+        cursor.execute('SELECT MAX({pk}) from {table}'.format(
+            pk=pk_name, table=self.quote_name(table_name)))
         return cursor.fetchone()[0]
 
     def for_update_sql(self, nowait=False):
-        raise NotImplementedError('SELECT FOR UPDATE is not implemented for this database backend')
+        raise NotImplementedError(
+            'SELECT FOR UPDATE is not implemented for this database backend')
 
     def deferrable_sql(self):
         # unused
@@ -46,18 +49,25 @@ class DatabaseOperations(BasePGDatabaseOperations):
         # impossible with Redshift to reset a sequence
         return []
 
+
 def _related_non_m2m_objects(old_field, new_field):
     # Filters out m2m objects from reverse relations.
     # Returns (old_relation, new_relation) tuples.
     return zip(
-        (obj for obj in old_field.model._meta.related_objects if not obj.field.many_to_many),
-        (obj for obj in new_field.model._meta.related_objects if not obj.field.many_to_many)
+        (obj
+         for obj in old_field.model._meta.related_objects
+         if not obj.field.many_to_many),
+        (obj
+         for obj in new_field.model._meta.related_objects
+         if not obj.field.many_to_many)
     )
 
 
 class DatabaseSchemaEditor(BasePGDatabaseSchemaEditor):
 
-    multiply_varchar_length = int(getattr(settings, "REDSHIFT_VARCHAR_LENGTH_MULTIPLIER", 1))
+    @property
+    def multiply_varchar_length(self):
+        return int(getattr(settings, "REDSHIFT_VARCHAR_LENGTH_MULTIPLIER", 1))
 
     def _model_indexes_sql(self, model):
         # Redshift doesn't support INDEX.
@@ -94,7 +104,8 @@ class DatabaseSchemaEditor(BasePGDatabaseSchemaEditor):
             if m:
                 definition = re.sub(
                     'varchar\((\d+?)\)',
-                    "varchar({0})".format(str(int(m.group(1)) * self.multiply_varchar_length)),
+                    "varchar({0})".format(
+                        str(int(m.group(1)) * self.multiply_varchar_length)),
                     definition)
 
             # Check constraints can go on the column SQL here
@@ -111,7 +122,8 @@ class DatabaseSchemaEditor(BasePGDatabaseSchemaEditor):
                 to_table = field.rel.to._meta.db_table
                 to_column = field.rel.to._meta.get_field(field.rel.field_name).column
                 if self.connection.features.supports_foreign_keys:
-                    self.deferred_sql.append(self._create_fk_sql(model, field, "_fk_%(to_table)s_%(to_column)s"))
+                    self.deferred_sql.append(self._create_fk_sql(
+                        model, field, "_fk_%(to_table)s_%(to_column)s"))
                 elif self.sql_create_inline_fk:
                     definition += " " + self.sql_create_inline_fk % {
                         "to_table": self.quote_name(to_table),
@@ -124,7 +136,8 @@ class DatabaseSchemaEditor(BasePGDatabaseSchemaEditor):
             ))
             # Autoincrement SQL (for backends with post table definition variant)
             if field.get_internal_type() == "AutoField":
-                autoinc_sql = self.connection.ops.autoinc_sql(model._meta.db_table, field.column)
+                autoinc_sql = self.connection.ops.autoinc_sql(
+                    model._meta.db_table, field.column)
                 if autoinc_sql:
                     self.deferred_sql.extend(autoinc_sql)
 
@@ -140,13 +153,15 @@ class DatabaseSchemaEditor(BasePGDatabaseSchemaEditor):
             "definition": ", ".join(column_sqls)
         }
         if model._meta.db_tablespace:
-            tablespace_sql = self.connection.ops.tablespace_sql(model._meta.db_tablespace)
+            tablespace_sql = self.connection.ops.tablespace_sql(
+                model._meta.db_tablespace)
             if tablespace_sql:
                 sql += ' ' + tablespace_sql
         # Prevent using [] as params, in the case a literal '%' is used in the definition
         self.execute(sql, params or None)
 
-        # Add any field index and index_together's (deferred as SQLite3 _remake_table needs it)
+        # Add any field index and index_together's
+        # (deferred as SQLite3 _remake_table needs it)
         self.deferred_sql.extend(self._model_indexes_sql(model))
 
         # Make M2M tables
@@ -190,8 +205,11 @@ class DatabaseSchemaEditor(BasePGDatabaseSchemaEditor):
         # ## Redshift doesn't support INDEX.
 
         # Add any FK constraints later
-        if field.rel and self.connection.features.supports_foreign_keys and field.db_constraint:
-            self.deferred_sql.append(self._create_fk_sql(model, field, "_fk_%(to_table)s_%(to_column)s"))
+        if (field.rel and
+                self.connection.features.supports_foreign_keys and
+                field.db_constraint):
+            self.deferred_sql.append(
+                self._create_fk_sql(model, field, "_fk_%(to_table)s_%(to_column)s"))
         # Reset connection if required
         if self.connection.features.connection_persists_old_columns:
             self.connection.close()
@@ -205,26 +223,27 @@ class DatabaseSchemaEditor(BasePGDatabaseSchemaEditor):
         if old_field.rel and old_field.db_constraint:
             fk_names = self._constraint_names(model, [old_field.column], foreign_key=True)
             if strict and len(fk_names) != 1:
-                raise ValueError("Found wrong number (%s) of foreign key constraints for %s.%s" % (
-                    len(fk_names),
-                    model._meta.db_table,
-                    old_field.column,
-                ))
+                raise ValueError(
+                    "Found wrong number (%s) of foreign key constraints for %s.%s" %
+                    (len(fk_names), model._meta.db_table, old_field.column))
             for fk_name in fk_names:
                 fks_dropped.add((old_field.column,))
-                self.execute(self._delete_constraint_sql(self.sql_delete_fk, model, fk_name))
+                self.execute(self._delete_constraint_sql(
+                    self.sql_delete_fk, model, fk_name))
         # Has unique been removed?
-        if old_field.unique and (not new_field.unique or (not old_field.primary_key and new_field.primary_key)):
+        if (old_field.unique and
+                (not new_field.unique or
+                 (not old_field.primary_key and new_field.primary_key))):
             # Find the unique constraint for this field
-            constraint_names = self._constraint_names(model, [old_field.column], unique=True)
+            constraint_names = self._constraint_names(
+                model, [old_field.column], unique=True)
             if strict and len(constraint_names) != 1:
-                raise ValueError("Found wrong number (%s) of unique constraints for %s.%s" % (
-                    len(constraint_names),
-                    model._meta.db_table,
-                    old_field.column,
-                ))
+                raise ValueError(
+                    "Found wrong number (%s) of unique constraints for %s.%s" %
+                    (len(constraint_names), model._meta.db_table, old_field.column))
             for constraint_name in constraint_names:
-                self.execute(self._delete_constraint_sql(self.sql_delete_unique, model, constraint_name))
+                self.execute(self._delete_constraint_sql(
+                    self.sql_delete_unique, model, constraint_name))
         # Drop incoming FK constraints if we're a primary key and things are going
         # to change.
         if old_field.primary_key and new_field.primary_key and old_type != new_type:
@@ -235,39 +254,37 @@ class DatabaseSchemaEditor(BasePGDatabaseSchemaEditor):
                     new_rel.related_model, [new_rel.field.column], foreign_key=True
                 )
                 for fk_name in rel_fk_names:
-                    self.execute(self._delete_constraint_sql(self.sql_delete_fk, new_rel.related_model, fk_name))
+                    self.execute(self._delete_constraint_sql(
+                        self.sql_delete_fk, new_rel.related_model, fk_name))
         # Removed an index? (no strict check, as multiple indexes are possible)
-        if (old_field.db_index and not new_field.db_index and
-                not old_field.unique and not
-        (not new_field.unique and old_field.unique)):
+        if (old_field.db_index and
+                not new_field.db_index and
+                not old_field.unique and
+                not (not new_field.unique and old_field.unique)):
             # Find the index for this field
             index_names = self._constraint_names(model, [old_field.column], index=True)
             for index_name in index_names:
-                self.execute(self._delete_constraint_sql(self.sql_delete_index, model, index_name))
+                self.execute(self._delete_constraint_sql(
+                    self.sql_delete_index, model, index_name))
         # Change check constraints?
         if old_db_params['check'] != new_db_params['check'] and old_db_params['check']:
-            constraint_names = self._constraint_names(model, [old_field.column], check=True)
+            constraint_names = self._constraint_names(
+                model, [old_field.column], check=True)
             if strict and len(constraint_names) != 1:
-                raise ValueError("Found wrong number (%s) of check constraints for %s.%s" % (
-                    len(constraint_names),
-                    model._meta.db_table,
-                    old_field.column,
-                ))
+                raise ValueError(
+                    "Found wrong number (%s) of check constraints for %s.%s" %
+                    (len(constraint_names), model._meta.db_table, old_field.column))
             for constraint_name in constraint_names:
-                self.execute(self._delete_constraint_sql(self.sql_delete_check, model, constraint_name))
+                self.execute(self._delete_constraint_sql(
+                    self.sql_delete_check, model, constraint_name))
         # Have they renamed the column?
         if old_field.column != new_field.column:
-            self.execute(self._rename_field_sql(model._meta.db_table, old_field, new_field, new_type))
+            self.execute(self._rename_field_sql(
+                model._meta.db_table, old_field, new_field, new_type))
         # Next, start accumulating actions to do
         actions = []
         post_actions = []
-        # Type change?
-        if old_type != new_type:
-            fragment, other_actions = self._alter_column_type_sql(
-                model._meta.db_table, old_field, new_field, new_type
-            )
-            actions.append(fragment)
-            post_actions.extend(other_actions)
+
         # When changing a column NULL constraint to NOT NULL with a given
         # default value, we need to perform 4 steps:
         #  1. Add a default for new incoming writes
@@ -282,7 +299,15 @@ class DatabaseSchemaEditor(BasePGDatabaseSchemaEditor):
             new_default is not None and
             not self.skip_default(new_field)
         )
-        if needs_database_default:
+        # Type or default is changed?
+        if (old_type != new_type) or needs_database_default:
+            # ## To change column type or default, We need this migration sequence:
+            # ##
+            # ## 1. Add new column with temporary name
+            # ## 2. Migrate values from original column to temprary column
+            # ## 3. Drop old column
+            # ## 4. Rename temporary column name to original column name
+
             # ## ALTER TABLE <table> ADD COLUMN 'tmp' <type> DEFAULT <value>
             definition, params = self.column_sql(model, new_field, include_default=True)
             actions.append((
@@ -324,9 +349,8 @@ class DatabaseSchemaEditor(BasePGDatabaseSchemaEditor):
             for sql, params in post_actions:
                 self.execute(sql, params)
         # Added a unique?
-        if (not old_field.unique and new_field.unique) or (
-                        old_field.primary_key and not new_field.primary_key and new_field.unique
-        ):
+        if ((not old_field.unique and new_field.unique) or
+           (old_field.primary_key and not new_field.primary_key and new_field.unique)):
             self.execute(self._create_unique_sql(model, [new_field.column]))
 
         # ## original BasePGDatabaseSchemaEditor._alter_field has CREATE INDEX
@@ -349,12 +373,14 @@ class DatabaseSchemaEditor(BasePGDatabaseSchemaEditor):
                     model._meta.db_table,
                 ))
             for constraint_name in constraint_names:
-                self.execute(self._delete_constraint_sql(self.sql_delete_pk, model, constraint_name))
+                self.execute(self._delete_constraint_sql(
+                    self.sql_delete_pk, model, constraint_name))
             # Make the new one
             self.execute(
                 self.sql_create_pk % {
                     "table": self.quote_name(model._meta.db_table),
-                    "name": self.quote_name(self._create_index_name(model, [new_field.column], suffix="_pk")),
+                    "name": self.quote_name(self._create_index_name(
+                        model, [new_field.column], suffix="_pk")),
                     "columns": self.quote_name(new_field.column),
                 }
             )
@@ -365,7 +391,8 @@ class DatabaseSchemaEditor(BasePGDatabaseSchemaEditor):
             rel_db_params = new_rel.field.db_parameters(connection=self.connection)
             rel_type = rel_db_params['type']
             fragment, other_actions = self._alter_column_type_sql(
-                new_rel.related_model._meta.db_table, old_rel.field, new_rel.field, rel_type
+                new_rel.related_model._meta.db_table, old_rel.field, new_rel.field,
+                rel_type
             )
             self.execute(
                 self.sql_alter_column % {
@@ -380,18 +407,21 @@ class DatabaseSchemaEditor(BasePGDatabaseSchemaEditor):
         if (new_field.rel and
                 (fks_dropped or not old_field.rel or not old_field.db_constraint) and
                 new_field.db_constraint):
-            self.execute(self._create_fk_sql(model, new_field, "_fk_%(to_table)s_%(to_column)s"))
+            self.execute(self._create_fk_sql(
+                model, new_field, "_fk_%(to_table)s_%(to_column)s"))
         # Rebuild FKs that pointed to us if we previously had to drop them
         if old_field.primary_key and new_field.primary_key and old_type != new_type:
             for rel in new_field.model._meta.related_objects:
                 if not rel.many_to_many:
-                    self.execute(self._create_fk_sql(rel.related_model, rel.field, "_fk"))
+                    self.execute(self._create_fk_sql(
+                        rel.related_model, rel.field, "_fk"))
         # Does it have check constraints we need to add?
         if old_db_params['check'] != new_db_params['check'] and new_db_params['check']:
             self.execute(
                 self.sql_create_check % {
                     "table": self.quote_name(model._meta.db_table),
-                    "name": self.quote_name(self._create_index_name(model, [new_field.column], suffix="_check")),
+                    "name": self.quote_name(self._create_index_name(
+                        model, [new_field.column], suffix="_check")),
                     "column": self.quote_name(new_field.column),
                     "check": new_db_params['check'],
                 }
@@ -405,14 +435,28 @@ class DatabaseSchemaEditor(BasePGDatabaseSchemaEditor):
             self.connection.close()
 
 
+redshift_data_types = {
+    "AutoField": "integer identity(1, 1)",
+    "DateTimeField": "timestamp",
+    "TextField": "varchar(max)",  # text must be varchar(max)
+}
+
+
+class DatabaseCreation(BasePGDatabaseCreation):
+
+    if django.VERSION < (1, 8):
+        data_types = deepcopy(BasePGDatabaseCreation.data_types)
+        data_types.update(redshift_data_types)
+
+
 class DatabaseWrapper(BasePGDatabaseWrapper):
     vendor = 'redshift'
 
     SchemaEditorClass = DatabaseSchemaEditor
-    data_types = deepcopy(BasePGDatabaseWrapper.data_types)
-    data_types["AutoField"] = "integer identity(1, 1)"
-    data_types["DateTimeField"] = "timestamp"
-    data_types["TextField"] = "varchar(max)"  # text must be varchar(max)
+
+    if django.VERSION >= (1, 8):
+        data_types = deepcopy(BasePGDatabaseWrapper.data_types)
+        data_types.update(redshift_data_types)
 
     def __init__(self, *args, **kwargs):
         super(DatabaseWrapper, self).__init__(*args, **kwargs)
